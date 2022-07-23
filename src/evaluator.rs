@@ -1,6 +1,7 @@
 use std::hash::Hash;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::cell::RefCell;
 use std::cmp::PartialEq;
 use std::fmt;
 use crate::parser::Expr;
@@ -79,14 +80,14 @@ impl fmt::Display for Value {
 }
 
 
-pub type Scope<'a> = HashMap<String, Rc<Value>>;
+pub type Scope<'a> = HashMap<String, Rc<RefCell<Value>>>;
 
 pub fn evaluate_expr(expr: Expr, scope: &mut Scope) -> Option<Value> {
     match expr {
         Expr::Value(value) => Some(value),
         Expr::Call(varbox, arguments) => evaluate_call(varbox.as_ref(), arguments, scope),
         Expr::Variable(variable) => match scope.get(&variable) {
-            Some(value) => Some(value.as_ref().clone()),
+            Some(value) => Some(value.borrow().to_owned()),
             None => None,
         }
     }
@@ -103,7 +104,7 @@ fn evaluate_call(function: &Expr, arguments: Vec<Expr>, scope: &mut Scope) -> Op
             parameters.iter().zip(arguments.iter()).for_each(|(parameter, arg)| {
                 match evaluate_expr(arg.clone(), scope) {
                     Some(value) => {
-                        function_scope.insert(parameter.to_owned(), Rc::new(value));
+                        function_scope.insert(parameter.to_owned(), Rc::new(RefCell::new(value)));
                     },
                     None => (),
                 }
@@ -122,7 +123,18 @@ fn stdlib(function: &Expr, arguments: &Vec<Expr>, scope: &mut Scope) -> Option<V
                     match &arguments[..] {
                         [Expr::Variable(name), expr] => {
                             let value = evaluate_expr(expr.to_owned(), scope)?;
-                            scope.insert(name.to_owned(), Rc::new(value.clone()));
+                            scope.insert(name.to_owned(), Rc::new(RefCell::new(value.clone())));
+                            Some(value)
+                        },
+                        _ => return None,
+                    }
+                }
+                "set" => {
+                    match &arguments[..] {
+                        [Expr::Variable(name), expr] => {
+                            let value = evaluate_expr(expr.to_owned(), scope)?;
+                            let mut variable_ref = scope.get_mut(name)?.borrow_mut();
+                            *variable_ref = value.clone();
                             Some(value)
                         },
                         _ => return None,
@@ -158,6 +170,22 @@ fn stdlib(function: &Expr, arguments: &Vec<Expr>, scope: &mut Scope) -> Option<V
                                 Some(Value::Bool(false)) => evaluate_expr(if_false.to_owned(), scope),
                                 _ => None
                             }
+                        },
+                        _ => None,
+                    }
+                }
+                "while" => {
+                    match &arguments[..] {
+                        [condition, body] => {
+                            loop {
+                                match evaluate_expr(condition.to_owned(), scope) {
+                                    Some(Value::Bool(true)) => {
+                                        evaluate_expr(body.to_owned(), scope);
+                                    }
+                                    _ => break
+                                }
+                            }
+                            return Some(Value::Bool(true))
                         },
                         _ => None,
                     }
@@ -291,11 +319,87 @@ fn stdlib(function: &Expr, arguments: &Vec<Expr>, scope: &mut Scope) -> Option<V
                         _ => return None
                     }
                 }
-                ":" => {
+                "," => {
                     let list: Vec<Value> = arguments.iter()
                         .filter_map(|arg| evaluate_expr(arg.to_owned(), scope))
                         .collect();
                     return Some(Value::List(list))
+                }
+                ":" => {
+                    let mut map: HashMap<Value, Value> = HashMap::new();
+                    for argument in arguments {
+                        match argument {
+                            Expr::Call(boxed_key, boxed_value) => {
+                                let key = evaluate_expr(*boxed_key.clone(), scope)?;
+                                let value = evaluate_expr(boxed_value.get(0)?.to_owned(), scope)?;
+                                map.insert(key, value);
+                            },
+                            _ => {}
+                        }
+                    }
+                    return Some(Value::Map(map))
+                }
+                "len" => {
+                    match &arguments[..] {
+                        [list] => {
+                            match evaluate_expr(list.to_owned(), scope)? {
+                                Value::List(list) => return Some(Value::Number(list.len() as f64)),
+                                Value::Map(map) => return Some(Value::Number(map.len() as f64)),
+                                _ => return None
+                            }
+                        }
+                        _ => return None
+                    }
+                }
+                "get" => {
+                    match &arguments[..] {
+                        [list_or_map, key] => {
+                            match (evaluate_expr(list_or_map.to_owned(), scope)?, evaluate_expr(key.to_owned(), scope)?) {
+                                (Value::List(list), Value::Number(i)) => {
+                                    match list.get(i as usize) {
+                                        Some(v) => Some(v.to_owned()),
+                                        _ => None,
+                                    }
+                                },
+                                (Value::Map(map), key) => {
+                                    match map.get(&key) {
+                                        Some(v) => Some(v.to_owned()),
+                                        _ => None,
+                                    }
+                                },
+                                _ => None,
+                            }
+                        },
+                        _ => return None,
+                    }
+                }
+                "insert" => {
+                    match &arguments[..] {
+                        [map, Expr::Call(key, value)] => {
+                            match (&mut evaluate_expr(map.to_owned(), scope)?, evaluate_expr(*key.to_owned(), scope)?, evaluate_expr(value.get(0)?.clone(), scope)?) {
+                                (Value::Map(map), key, value) => {
+                                    map.insert(key, value.to_owned());
+                                    return Some(value.to_owned());
+                                },
+                                _ => return None
+                            }
+                        },
+                        _ => return None
+                    }
+                }
+                "push" => {
+                    match &arguments[..] {
+                        [list, value] => {
+                            match (&mut evaluate_expr(list.to_owned(), scope)?, evaluate_expr(value.to_owned(), scope)?) {
+                                (Value::List(list), value) => {
+                                    list.push(value);
+                                    return Some(Value::List(list.to_vec()))
+                                },
+                                _ => return None,
+                            }
+                        },
+                        _ => return None,
+                    }
                 }
                 _ => return None
             }
